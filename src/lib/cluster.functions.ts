@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { generateText, Output } from "ai";
+import { generateObject } from "ai";
 import { z } from "zod";
 
 const FailureItem = z.object({
@@ -65,11 +65,11 @@ export const clusterFailures = createServerFn({ method: "POST" })
       .filter(Boolean)
       .join("\n");
 
-    const { experimental_output } = await generateText({
+    const { object } = await generateObject({
       model: gateway("google/gemini-3-flash-preview"),
-      experimental_output: Output.object({ schema: OutputSchema }),
+      schema: OutputSchema,
       prompt,
     });
 
-    return experimental_output;
+    return object;
   });
