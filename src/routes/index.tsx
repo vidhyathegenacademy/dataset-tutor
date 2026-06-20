@@ -1414,7 +1414,7 @@ function SummaryPanel({ project }: { project: Project }) {
       </div>
 
       {rubric.mode === "dimensional" && (
-        <div className="col-span-8 rounded-xl border border-border bg-card p-5">
+        <div className="col-span-6 rounded-xl border border-border bg-card p-5">
           <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Average score by dimension</div>
           <div className="mt-4 space-y-3">
             {dimAvgs.length === 0 && <div className="text-xs text-muted-foreground">No dimensions defined.</div>}
@@ -1433,7 +1433,7 @@ function SummaryPanel({ project }: { project: Project }) {
         </div>
       )}
 
-      <div className={cn("rounded-xl border border-border bg-card p-5", rubric.mode === "dimensional" ? "col-span-12" : "col-span-8")}>
+      <div className={cn("rounded-xl border border-border bg-card p-5", rubric.mode === "dimensional" ? "col-span-6" : "col-span-12")}>
         <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Failure distribution</div>
         <div className="mt-4 space-y-2">
           {catCounts.map((c) => (
@@ -1463,6 +1463,66 @@ function SummaryPanel({ project }: { project: Project }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ---------- METRICS ---------- */
+
+type ClassMetric = { label: string; support: number; tp: number; fp: number; fn: number; precision: number; recall: number; f1: number };
+
+function normLabel(s: string): string {
+  return (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function computePRF1(rows: Row[]): {
+  n: number;
+  accuracy: number;
+  precision: number;
+  recall: number;
+  f1: number;
+  classes: string[];
+  perClass: ClassMetric[];
+} {
+  const pairs = rows
+    .map((r) => ({ gt: normLabel(r.groundTruth), pred: normLabel(r.prediction) }))
+    .filter((p) => p.gt || p.pred);
+  const n = pairs.length;
+  if (n === 0) {
+    return { n: 0, accuracy: 0, precision: 0, recall: 0, f1: 0, classes: [], perClass: [] };
+  }
+  const labels = Array.from(new Set(pairs.flatMap((p) => [p.gt, p.pred]).filter(Boolean))).sort();
+  const perClass: ClassMetric[] = labels.map((label) => {
+    let tp = 0, fp = 0, fn = 0, support = 0;
+    for (const { gt, pred } of pairs) {
+      if (gt === label) support++;
+      if (pred === label && gt === label) tp++;
+      else if (pred === label && gt !== label) fp++;
+      else if (pred !== label && gt === label) fn++;
+    }
+    const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
+    const recall = tp + fn === 0 ? 0 : tp / (tp + fn);
+    const f1 = precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall);
+    return { label, support, tp, fp, fn, precision, recall, f1 };
+  });
+  const correct = pairs.filter((p) => p.gt === p.pred && p.gt).length;
+  const accuracy = correct / n;
+  const macroP = perClass.reduce((a, c) => a + c.precision, 0) / (perClass.length || 1);
+  const macroR = perClass.reduce((a, c) => a + c.recall, 0) / (perClass.length || 1);
+  const macroF1 = perClass.reduce((a, c) => a + c.f1, 0) / (perClass.length || 1);
+  return { n, accuracy, precision: macroP, recall: macroR, f1: macroF1, classes: labels, perClass };
+}
+
+function fmtPct(v: number): string {
+  if (!isFinite(v)) return "—";
+  return `${(v * 100).toFixed(1)}%`;
+}
+
+function MetricTile({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
+  return (
+    <div className={cn("rounded-lg border p-3", accent ? "border-accent/30 bg-accent/5" : "border-border bg-surface-2")}>
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 font-mono text-2xl font-semibold tabular-nums">{fmtPct(value)}</div>
     </div>
   );
 }
