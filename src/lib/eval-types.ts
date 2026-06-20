@@ -92,12 +92,12 @@ export function autoMatchResult(row: Row, am: AutoMatch): "pass" | "fail" | null
 
 export function computeStatus(row: Row, rubric: Rubric): { status: "pass" | "fail" | "incomplete"; reasons: string[]; total: number } {
   if (rubric.mode === "binary") {
+    if (row.manualStatus) return { status: row.manualStatus, reasons: ["Manual"], total: 0 };
     if (rubric.autoMatch?.enabled) {
       const auto = autoMatchResult(row, rubric.autoMatch);
-      if (auto) return { status: auto, reasons: auto === "fail" ? ["Auto-match: prediction ≠ ground truth"] : [], total: 0 };
+      if (auto) return { status: auto, reasons: auto === "fail" ? ["Auto: prediction ≠ ground truth"] : ["Auto-match"], total: 0 };
     }
-    if (!row.manualStatus) return { status: "incomplete", reasons: ["Not yet scored"], total: 0 };
-    return { status: row.manualStatus, reasons: [], total: 0 };
+    return { status: "incomplete", reasons: ["Not yet scored"], total: 0 };
   }
   const reasons: string[] = [];
   const scores = rubric.dimensions.map((d) => row.scores[d.id]);
