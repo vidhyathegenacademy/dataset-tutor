@@ -999,6 +999,67 @@ function ClusterPanel({ project, update }: { project: Project; update: (u: (p: P
   const [newCatName, setNewCatName] = useState("");
   const [newCatDesc, setNewCatDesc] = useState("");
   const [focusRowId, setFocusRowId] = useState<string | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const runCluster = useServerFn(clusterFailures);
+
+  async function autoClusterWithAI(scope: "unassigned" | "all") {
+    const pool = scope === "unassigned" ? unassigned : failures;
+    if (pool.length === 0) { toast.error("No failures to cluster"); return; }
+    setAiLoading(true);
+    try {
+      const result = await runCluster({
+        data: {
+          failures: pool.map((r) => ({
+            id: r.id,
+            input: r.input ?? "",
+            groundTruth: r.groundTruth ?? "",
+            prediction: r.prediction ?? "",
+            notes: r.notes ?? "",
+            reasons: effectiveStatus(r, rubric).reasons,
+          })),
+          existingCategories: scope === "unassigned"
+            ? rubric.categories.map((c) => ({ id: c.id, name: c.name, description: c.description }))
+            : [],
+          maxCategories: Math.min(8, Math.max(2, Math.round(Math.sqrt(pool.length)) + 1)),
+        },
+      });
+
+      update((p) => {
+        const existingByName = new Map(p.rubric.categories.map((c) => [c.name.toLowerCase(), c]));
+        const newCats: FailureCategory[] = [...p.rubric.categories];
+        const assignments = new Map<string, string>(); // rowId -> catId
+        for (const c of result.categories) {
+          let cat = existingByName.get(c.name.toLowerCase());
+          if (!cat) {
+            cat = { id: uid(), name: c.name, description: c.description };
+            newCats.push(cat);
+            existingByName.set(c.name.toLowerCase(), cat);
+          } else if (!cat.description && c.description) {
+            const idx = newCats.findIndex((x) => x.id === cat!.id);
+            if (idx >= 0) newCats[idx] = { ...cat, description: c.description };
+          }
+          for (const fid of c.failureIds) assignments.set(fid, cat.id);
+        }
+        return {
+          ...p,
+          rubric: { ...p.rubric, categories: newCats },
+          rows: p.rows.map((r) =>
+            assignments.has(r.id) && (scope === "all" || !r.categoryId)
+              ? { ...r, categoryId: assignments.get(r.id)! }
+              : r,
+          ),
+        };
+      });
+      toast.success(`AI proposed ${result.categories.length} categor${result.categories.length === 1 ? "y" : "ies"}`);
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg.includes("429")) toast.error("Rate limited — try again in a moment.");
+      else if (msg.includes("402")) toast.error("Out of AI credits. Add credits in your workspace billing.");
+      else toast.error(`Auto-cluster failed: ${msg}`);
+    } finally {
+      setAiLoading(false);
+    }
+  }
 
   function toggle(id: string) {
     setSelected((s) => {
