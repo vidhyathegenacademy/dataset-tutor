@@ -16,7 +16,10 @@ export type FailRule =
   | { id: string; kind: "dimension_lt"; dimensionId: string; value: number }
   | { id: string; kind: "total_lt"; value: number };
 
+export type RubricMode = "binary" | "dimensional";
+
 export type Rubric = {
+  mode: RubricMode;
   dimensions: Dimension[];
   failRules: FailRule[];
   categories: FailureCategory[];
@@ -43,7 +46,15 @@ export type Project = {
   rows: Row[];
 };
 
-export const defaultRubric = (): Rubric => ({
+export const emptyRubric = (): Rubric => ({
+  mode: "binary",
+  dimensions: [],
+  failRules: [],
+  categories: [],
+});
+
+export const socialMediaPreset = (): Rubric => ({
+  mode: "dimensional",
   dimensions: [
     { id: "d1", name: "Factual Correctness", description: "Hallucinations, wrong facts.", min: 1, max: 5 },
     { id: "d2", name: "Clarity", description: "Concise, coherent, easy to read.", min: 1, max: 5 },
@@ -64,10 +75,15 @@ export const defaultRubric = (): Rubric => ({
 });
 
 export function computeStatus(row: Row, rubric: Rubric): { status: "pass" | "fail" | "incomplete"; reasons: string[]; total: number } {
+  if (rubric.mode === "binary") {
+    if (!row.manualStatus) return { status: "incomplete", reasons: ["Not yet scored"], total: 0 };
+    return { status: row.manualStatus, reasons: [], total: 0 };
+  }
   const reasons: string[] = [];
   const scores = rubric.dimensions.map((d) => row.scores[d.id]);
   const anyMissing = scores.some((s) => s == null);
   const total = scores.reduce((acc: number, s) => acc + (s ?? 0), 0);
+  if (rubric.dimensions.length === 0) return { status: "incomplete", reasons: ["No dimensions defined"], total };
   if (anyMissing) return { status: "incomplete", reasons: ["Not all dimensions scored"], total };
   for (const rule of rubric.failRules) {
     if (rule.kind === "dimension_lt") {
@@ -82,7 +98,9 @@ export function computeStatus(row: Row, rubric: Rubric): { status: "pass" | "fai
 }
 
 export function effectiveStatus(row: Row, rubric: Rubric) {
-  if (row.manualStatus) return { status: row.manualStatus, reasons: ["Manual override"], total: 0 };
+  if (rubric.mode === "dimensional" && row.manualStatus) {
+    return { status: row.manualStatus, reasons: ["Manual override"], total: 0 };
+  }
   return computeStatus(row, rubric);
 }
 
