@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: dataset-tutor
+    runtime: node
+    plan: free
+    buildCommand: npm install && NITRO_PRESET=node-server npm run build
+    startCommand: node .output/server/index.mjs
+    envVars:
+      - key: NODE_ENV
+        value: production
