@@ -1,5 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { useServerFn } from "@tanstack/react-start";
+import { clusterFailures } from "@/lib/cluster.functions";
+import { Loader2, Wand2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -996,6 +999,67 @@ function ClusterPanel({ project, update }: { project: Project; update: (u: (p: P
   const [newCatName, setNewCatName] = useState("");
   const [newCatDesc, setNewCatDesc] = useState("");
   const [focusRowId, setFocusRowId] = useState<string | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+  const runCluster = useServerFn(clusterFailures);
+
+  async function autoClusterWithAI(scope: "unassigned" | "all") {
+    const pool = scope === "unassigned" ? unassigned : failures;
+    if (pool.length === 0) { toast.error("No failures to cluster"); return; }
+    setAiLoading(true);
+    try {
+      const result = await runCluster({
+        data: {
+          failures: pool.map((r) => ({
+            id: r.id,
+            input: r.input ?? "",
+            groundTruth: r.groundTruth ?? "",
+            prediction: r.prediction ?? "",
+            notes: r.notes ?? "",
+            reasons: effectiveStatus(r, rubric).reasons,
+          })),
+          existingCategories: scope === "unassigned"
+            ? rubric.categories.map((c) => ({ id: c.id, name: c.name, description: c.description }))
+            : [],
+          maxCategories: Math.min(8, Math.max(2, Math.round(Math.sqrt(pool.length)) + 1)),
+        },
+      });
+
+      update((p) => {
+        const existingByName = new Map(p.rubric.categories.map((c) => [c.name.toLowerCase(), c]));
+        const newCats: FailureCategory[] = [...p.rubric.categories];
+        const assignments = new Map<string, string>(); // rowId -> catId
+        for (const c of result.categories) {
+          let cat = existingByName.get(c.name.toLowerCase());
+          if (!cat) {
+            cat = { id: uid(), name: c.name, description: c.description };
+            newCats.push(cat);
+            existingByName.set(c.name.toLowerCase(), cat);
+          } else if (!cat.description && c.description) {
+            const idx = newCats.findIndex((x) => x.id === cat!.id);
+            if (idx >= 0) newCats[idx] = { ...cat, description: c.description };
+          }
+          for (const fid of c.failureIds) assignments.set(fid, cat.id);
+        }
+        return {
+          ...p,
+          rubric: { ...p.rubric, categories: newCats },
+          rows: p.rows.map((r) =>
+            assignments.has(r.id) && (scope === "all" || !r.categoryId)
+              ? { ...r, categoryId: assignments.get(r.id)! }
+              : r,
+          ),
+        };
+      });
+      toast.success(`AI proposed ${result.categories.length} categor${result.categories.length === 1 ? "y" : "ies"}`);
+    } catch (e: any) {
+      const msg = String(e?.message ?? e);
+      if (msg.includes("429")) toast.error("Rate limited — try again in a moment.");
+      else if (msg.includes("402")) toast.error("Out of AI credits. Add credits in your workspace billing.");
+      else toast.error(`Auto-cluster failed: ${msg}`);
+    } finally {
+      setAiLoading(false);
+    }
+  }
 
   function toggle(id: string) {
     setSelected((s) => {
@@ -1092,11 +1156,23 @@ function ClusterPanel({ project, update }: { project: Project; update: (u: (p: P
       </div>
 
       <div className="col-span-5 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <SectionHeader title="Failure categories" subtitle="Cluster results by root cause." />
-          <Button size="sm" variant="outline" onClick={() => { setCreateOpen(true); }}>
-            <Plus className="h-3.5 w-3.5" />New
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={aiLoading || failures.length === 0}
+              onClick={() => autoClusterWithAI(rubric.categories.length === 0 ? "all" : "unassigned")}
+              title={rubric.categories.length === 0 ? "Let AI propose categories for all failures" : "Let AI sort unassigned failures into existing or new categories"}
+            >
+              {aiLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+              {rubric.categories.length === 0 ? "Auto-cluster with AI" : "AI: sort unassigned"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => { setCreateOpen(true); }}>
+              <Plus className="h-3.5 w-3.5" />New
+            </Button>
+          </div>
         </div>
 
         <div className="space-y-2">
@@ -1279,22 +1355,66 @@ function SummaryPanel({ project }: { project: Project }) {
   const unassignedFailures = failures.filter((r) => !r.categoryId).length;
   const pass = rows.filter((r) => effectiveStatus(r, rubric).status === "pass").length;
   const fail = failures.length;
-  const passRate = rows.length ? (pass / rows.length) * 100 : 0;
   const maxCat = Math.max(1, ...catCounts.map((c) => c.count), unassignedFailures);
+
+  // Precision / Recall / F1 from groundTruth vs prediction (treating each unique label as a class).
+  const metrics = useMemo(() => computePRF1(rows), [rows]);
 
   return (
     <div className="grid grid-cols-12 gap-4">
-      <div className="col-span-4 rounded-xl border border-border bg-card p-5">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Pass rate</div>
-        <div className="mt-2 font-mono text-5xl font-semibold tabular-nums">{passRate.toFixed(0)}<span className="text-2xl text-muted-foreground">%</span></div>
-        <div className="mt-1 text-xs text-muted-foreground">{pass} pass · {fail} fail · {rows.length} total</div>
-        <div className="mt-4 h-2 overflow-hidden rounded-full bg-muted">
-          <div className="h-full bg-success" style={{ width: `${passRate}%` }} />
+      <div className="col-span-12 rounded-xl border border-border bg-card p-5">
+        <div className="flex items-baseline justify-between gap-4">
+          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Classification metrics
+            <span className="ml-2 normal-case text-[10px] font-normal text-muted-foreground/70">macro-averaged · ground truth vs. prediction</span>
+          </div>
+          <div className="text-xs text-muted-foreground">{pass} pass · {fail} fail · {rows.length} total · {metrics.classes.length} class{metrics.classes.length === 1 ? "" : "es"}</div>
         </div>
+        {metrics.n === 0 ? (
+          <div className="mt-4 text-xs text-muted-foreground">No labeled rows to score.</div>
+        ) : (
+          <>
+            <div className="mt-4 grid grid-cols-4 gap-3">
+              <MetricTile label="Accuracy" value={metrics.accuracy} />
+              <MetricTile label="Precision" value={metrics.precision} accent />
+              <MetricTile label="Recall" value={metrics.recall} accent />
+              <MetricTile label="F1" value={metrics.f1} accent />
+            </div>
+            {metrics.classes.length > 1 && (
+              <div className="mt-5">
+                <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Per-class breakdown</div>
+                <div className="overflow-hidden rounded-md border border-border">
+                  <table className="w-full text-xs">
+                    <thead className="bg-surface-2 text-muted-foreground">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">Class</th>
+                        <th className="px-3 py-2 text-right font-medium">Support</th>
+                        <th className="px-3 py-2 text-right font-medium">Precision</th>
+                        <th className="px-3 py-2 text-right font-medium">Recall</th>
+                        <th className="px-3 py-2 text-right font-medium">F1</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {metrics.perClass.map((c) => (
+                        <tr key={c.label} className="border-t border-border">
+                          <td className="px-3 py-2 font-mono text-foreground">{c.label || <em className="text-muted-foreground">empty</em>}</td>
+                          <td className="px-3 py-2 text-right font-mono text-muted-foreground">{c.support}</td>
+                          <td className="px-3 py-2 text-right font-mono">{fmtPct(c.precision)}</td>
+                          <td className="px-3 py-2 text-right font-mono">{fmtPct(c.recall)}</td>
+                          <td className="px-3 py-2 text-right font-mono">{fmtPct(c.f1)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {rubric.mode === "dimensional" && (
-        <div className="col-span-8 rounded-xl border border-border bg-card p-5">
+        <div className="col-span-6 rounded-xl border border-border bg-card p-5">
           <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Average score by dimension</div>
           <div className="mt-4 space-y-3">
             {dimAvgs.length === 0 && <div className="text-xs text-muted-foreground">No dimensions defined.</div>}
@@ -1313,7 +1433,7 @@ function SummaryPanel({ project }: { project: Project }) {
         </div>
       )}
 
-      <div className={cn("rounded-xl border border-border bg-card p-5", rubric.mode === "dimensional" ? "col-span-12" : "col-span-8")}>
+      <div className={cn("rounded-xl border border-border bg-card p-5", rubric.mode === "dimensional" ? "col-span-6" : "col-span-12")}>
         <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Failure distribution</div>
         <div className="mt-4 space-y-2">
           {catCounts.map((c) => (
@@ -1343,6 +1463,66 @@ function SummaryPanel({ project }: { project: Project }) {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/* ---------- METRICS ---------- */
+
+type ClassMetric = { label: string; support: number; tp: number; fp: number; fn: number; precision: number; recall: number; f1: number };
+
+function normLabel(s: string): string {
+  return (s ?? "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function computePRF1(rows: Row[]): {
+  n: number;
+  accuracy: number;
+  precision: number;
+  recall: number;
+  f1: number;
+  classes: string[];
+  perClass: ClassMetric[];
+} {
+  const pairs = rows
+    .map((r) => ({ gt: normLabel(r.groundTruth), pred: normLabel(r.prediction) }))
+    .filter((p) => p.gt || p.pred);
+  const n = pairs.length;
+  if (n === 0) {
+    return { n: 0, accuracy: 0, precision: 0, recall: 0, f1: 0, classes: [], perClass: [] };
+  }
+  const labels = Array.from(new Set(pairs.flatMap((p) => [p.gt, p.pred]).filter(Boolean))).sort();
+  const perClass: ClassMetric[] = labels.map((label) => {
+    let tp = 0, fp = 0, fn = 0, support = 0;
+    for (const { gt, pred } of pairs) {
+      if (gt === label) support++;
+      if (pred === label && gt === label) tp++;
+      else if (pred === label && gt !== label) fp++;
+      else if (pred !== label && gt === label) fn++;
+    }
+    const precision = tp + fp === 0 ? 0 : tp / (tp + fp);
+    const recall = tp + fn === 0 ? 0 : tp / (tp + fn);
+    const f1 = precision + recall === 0 ? 0 : (2 * precision * recall) / (precision + recall);
+    return { label, support, tp, fp, fn, precision, recall, f1 };
+  });
+  const correct = pairs.filter((p) => p.gt === p.pred && p.gt).length;
+  const accuracy = correct / n;
+  const macroP = perClass.reduce((a, c) => a + c.precision, 0) / (perClass.length || 1);
+  const macroR = perClass.reduce((a, c) => a + c.recall, 0) / (perClass.length || 1);
+  const macroF1 = perClass.reduce((a, c) => a + c.f1, 0) / (perClass.length || 1);
+  return { n, accuracy, precision: macroP, recall: macroR, f1: macroF1, classes: labels, perClass };
+}
+
+function fmtPct(v: number): string {
+  if (!isFinite(v)) return "—";
+  return `${(v * 100).toFixed(1)}%`;
+}
+
+function MetricTile({ label, value, accent }: { label: string; value: number; accent?: boolean }) {
+  return (
+    <div className={cn("rounded-lg border p-3", accent ? "border-accent/30 bg-accent/5" : "border-border bg-surface-2")}>
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">{label}</div>
+      <div className="mt-1 font-mono text-2xl font-semibold tabular-nums">{fmtPct(value)}</div>
     </div>
   );
 }
