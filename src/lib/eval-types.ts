@@ -18,11 +18,17 @@ export type FailRule =
 
 export type RubricMode = "binary" | "dimensional";
 
+export type AutoMatch = {
+  enabled: boolean;
+  mode: "exact" | "normalized" | "contains";
+};
+
 export type Rubric = {
   mode: RubricMode;
   dimensions: Dimension[];
   failRules: FailRule[];
   categories: FailureCategory[];
+  autoMatch?: AutoMatch;
 };
 
 export type Row = {
@@ -74,8 +80,22 @@ export const socialMediaPreset = (): Rubric => ({
   ],
 });
 
+export function autoMatchResult(row: Row, am: AutoMatch): "pass" | "fail" | null {
+  if (!am.enabled) return null;
+  const norm = (s: string) => (am.mode === "exact" ? s : s.trim().toLowerCase().replace(/\s+/g, " "));
+  const gt = norm(row.groundTruth ?? "");
+  const pred = norm(row.prediction ?? "");
+  if (!gt && !pred) return null;
+  if (am.mode === "contains") return pred.includes(gt) && gt.length > 0 ? "pass" : "fail";
+  return gt === pred ? "pass" : "fail";
+}
+
 export function computeStatus(row: Row, rubric: Rubric): { status: "pass" | "fail" | "incomplete"; reasons: string[]; total: number } {
   if (rubric.mode === "binary") {
+    if (rubric.autoMatch?.enabled) {
+      const auto = autoMatchResult(row, rubric.autoMatch);
+      if (auto) return { status: auto, reasons: auto === "fail" ? ["Auto-match: prediction ≠ ground truth"] : [], total: 0 };
+    }
     if (!row.manualStatus) return { status: "incomplete", reasons: ["Not yet scored"], total: 0 };
     return { status: row.manualStatus, reasons: [], total: 0 };
   }
