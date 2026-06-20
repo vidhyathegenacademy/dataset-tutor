@@ -1,5 +1,5 @@
 import type { Project } from "./eval-types";
-import { defaultRubric, uid } from "./eval-types";
+import { emptyRubric, uid } from "./eval-types";
 
 const KEY = "eval-projects-v1";
 const ACTIVE = "eval-active-project-v1";
