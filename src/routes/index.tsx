@@ -1355,18 +1355,62 @@ function SummaryPanel({ project }: { project: Project }) {
   const unassignedFailures = failures.filter((r) => !r.categoryId).length;
   const pass = rows.filter((r) => effectiveStatus(r, rubric).status === "pass").length;
   const fail = failures.length;
-  const passRate = rows.length ? (pass / rows.length) * 100 : 0;
   const maxCat = Math.max(1, ...catCounts.map((c) => c.count), unassignedFailures);
+
+  // Precision / Recall / F1 from groundTruth vs prediction (treating each unique label as a class).
+  const metrics = useMemo(() => computePRF1(rows), [rows]);
 
   return (
     <div className="grid grid-cols-12 gap-4">
-      <div className="col-span-4 rounded-xl border border-border bg-card p-5">
-        <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Pass rate</div>
-        <div className="mt-2 font-mono text-5xl font-semibold tabular-nums">{passRate.toFixed(0)}<span className="text-2xl text-muted-foreground">%</span></div>
-        <div className="mt-1 text-xs text-muted-foreground">{pass} pass · {fail} fail · {rows.length} total</div>
-        <div className="mt-4 h-2 overflow-hidden rounded-full bg-muted">
-          <div className="h-full bg-success" style={{ width: `${passRate}%` }} />
+      <div className="col-span-12 rounded-xl border border-border bg-card p-5">
+        <div className="flex items-baseline justify-between gap-4">
+          <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Classification metrics
+            <span className="ml-2 normal-case text-[10px] font-normal text-muted-foreground/70">macro-averaged · ground truth vs. prediction</span>
+          </div>
+          <div className="text-xs text-muted-foreground">{pass} pass · {fail} fail · {rows.length} total · {metrics.classes.length} class{metrics.classes.length === 1 ? "" : "es"}</div>
         </div>
+        {metrics.n === 0 ? (
+          <div className="mt-4 text-xs text-muted-foreground">No labeled rows to score.</div>
+        ) : (
+          <>
+            <div className="mt-4 grid grid-cols-4 gap-3">
+              <MetricTile label="Accuracy" value={metrics.accuracy} />
+              <MetricTile label="Precision" value={metrics.precision} accent />
+              <MetricTile label="Recall" value={metrics.recall} accent />
+              <MetricTile label="F1" value={metrics.f1} accent />
+            </div>
+            {metrics.classes.length > 1 && (
+              <div className="mt-5">
+                <div className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Per-class breakdown</div>
+                <div className="overflow-hidden rounded-md border border-border">
+                  <table className="w-full text-xs">
+                    <thead className="bg-surface-2 text-muted-foreground">
+                      <tr>
+                        <th className="px-3 py-2 text-left font-medium">Class</th>
+                        <th className="px-3 py-2 text-right font-medium">Support</th>
+                        <th className="px-3 py-2 text-right font-medium">Precision</th>
+                        <th className="px-3 py-2 text-right font-medium">Recall</th>
+                        <th className="px-3 py-2 text-right font-medium">F1</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {metrics.perClass.map((c) => (
+                        <tr key={c.label} className="border-t border-border">
+                          <td className="px-3 py-2 font-mono text-foreground">{c.label || <em className="text-muted-foreground">empty</em>}</td>
+                          <td className="px-3 py-2 text-right font-mono text-muted-foreground">{c.support}</td>
+                          <td className="px-3 py-2 text-right font-mono">{fmtPct(c.precision)}</td>
+                          <td className="px-3 py-2 text-right font-mono">{fmtPct(c.recall)}</td>
+                          <td className="px-3 py-2 text-right font-mono">{fmtPct(c.f1)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       {rubric.mode === "dimensional" && (
