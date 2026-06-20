@@ -1156,11 +1156,23 @@ function ClusterPanel({ project, update }: { project: Project; update: (u: (p: P
       </div>
 
       <div className="col-span-5 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <SectionHeader title="Failure categories" subtitle="Cluster results by root cause." />
-          <Button size="sm" variant="outline" onClick={() => { setCreateOpen(true); }}>
-            <Plus className="h-3.5 w-3.5" />New
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={aiLoading || failures.length === 0}
+              onClick={() => autoClusterWithAI(rubric.categories.length === 0 ? "all" : "unassigned")}
+              title={rubric.categories.length === 0 ? "Let AI propose categories for all failures" : "Let AI sort unassigned failures into existing or new categories"}
+            >
+              {aiLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+              {rubric.categories.length === 0 ? "Auto-cluster with AI" : "AI: sort unassigned"}
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => { setCreateOpen(true); }}>
+              <Plus className="h-3.5 w-3.5" />New
+            </Button>
+          </div>
         </div>
 
         <div className="space-y-2">
