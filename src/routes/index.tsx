@@ -499,12 +499,32 @@ function RubricEditor({ rubric, onChange }: { rubric: Rubric; onChange: (r: Rubr
       )}
 
       {rubric.mode === "binary" && (
-        <div className="rounded-xl border border-dashed border-border bg-card p-6 text-center">
-          <Check className="mx-auto h-5 w-5 text-success" />
-          <div className="mt-2 text-sm font-medium">Binary mode is ready</div>
-          <p className="mx-auto mt-1 max-w-md text-xs text-muted-foreground">
-            On the Score step you'll mark each row PASS or FAIL. You can still discover failure
-            categories in the Cluster step.
+        <div className="rounded-xl border border-border bg-card p-4">
+          <SectionHeader title="Auto-match (optional)" subtitle="Auto-compute PASS/FAIL by comparing prediction to ground truth. Manual verdicts still override." />
+          <div className="mt-3 flex items-center gap-3">
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={!!rubric.autoMatch?.enabled}
+                onCheckedChange={(c) =>
+                  onChange({ ...rubric, autoMatch: { mode: rubric.autoMatch?.mode ?? "normalized", enabled: !!c } })
+                }
+              />
+              <span>Enable auto-match</span>
+            </label>
+            <Select
+              value={rubric.autoMatch?.mode ?? "normalized"}
+              onValueChange={(v) => onChange({ ...rubric, autoMatch: { enabled: !!rubric.autoMatch?.enabled, mode: v as "exact" | "normalized" | "contains" } })}
+            >
+              <SelectTrigger className="h-8 w-[220px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="normalized">Normalized (trim + case-insensitive)</SelectItem>
+                <SelectItem value="exact">Exact match</SelectItem>
+                <SelectItem value="contains">Prediction contains ground truth</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="mt-3 text-xs text-muted-foreground">
+            Best for classification, routing, or short-answer tasks where there's a single correct answer.
           </p>
         </div>
       )}
@@ -585,6 +605,7 @@ function FailRuleRow({ rule, dims, onChange, onRemove }: { rule: FailRule; dims:
 function ScorePanel({ project, update }: { project: Project; update: (u: (p: Project) => Project) => void }) {
   const [selectedRowId, setSelectedRowId] = useState<string | null>(project.rows[0]?.id ?? null);
   const [filter, setFilter] = useState<"all" | "pass" | "fail" | "incomplete">("all");
+  const [view, setView] = useState<"focus" | "sheet">("focus");
 
   useEffect(() => {
     if (!project.rows.find((r) => r.id === selectedRowId)) {
@@ -602,26 +623,183 @@ function ScorePanel({ project, update }: { project: Project; update: (u: (p: Pro
     );
   }
 
+  const updateRow = (updated: Row) =>
+    update((p) => ({ ...p, rows: p.rows.map((r) => (r.id === updated.id ? updated : r)) }));
+
   return (
-    <div className="grid grid-cols-12 gap-4">
-      <div className="col-span-4">
-        <RowList rows={project.rows} rubric={project.rubric} selectedId={selectedRowId} onSelect={setSelectedRowId} filter={filter} setFilter={setFilter} />
-      </div>
-      <div className="col-span-8">
-        {selectedRowId ? (
-          <RowDetail
-            row={project.rows.find((r) => r.id === selectedRowId)!}
-            rubric={project.rubric}
-            onChange={(updated) => update((p) => ({ ...p, rows: p.rows.map((r) => (r.id === updated.id ? updated : r)) }))}
-            onNext={() => {
-              const idx = project.rows.findIndex((r) => r.id === selectedRowId);
-              if (idx >= 0 && idx < project.rows.length - 1) setSelectedRowId(project.rows[idx + 1].id);
-            }}
-          />
-        ) : (
-          <div className="rounded-lg border border-border bg-card p-10 text-center text-sm text-muted-foreground">Select a row</div>
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="inline-flex rounded-md border border-border bg-card p-0.5">
+          {(["focus", "sheet"] as const).map((v) => (
+            <button key={v} onClick={() => setView(v)}
+              className={cn(
+                "rounded px-3 py-1 text-xs font-medium capitalize transition-colors",
+                view === v ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
+              )}>{v} view</button>
+          ))}
+        </div>
+        {project.rubric.mode === "binary" && project.rubric.autoMatch?.enabled && (
+          <Badge variant="outline" className="font-mono text-[10px]">
+            <Sparkles className="h-3 w-3" /> Auto-match: {project.rubric.autoMatch.mode}
+          </Badge>
         )}
       </div>
+
+      {view === "focus" ? (
+        <div className="grid grid-cols-12 gap-4">
+          <div className="col-span-4">
+            <RowList rows={project.rows} rubric={project.rubric} selectedId={selectedRowId} onSelect={setSelectedRowId} filter={filter} setFilter={setFilter} />
+          </div>
+          <div className="col-span-8">
+            {selectedRowId ? (
+              <RowDetail
+                row={project.rows.find((r) => r.id === selectedRowId)!}
+                rubric={project.rubric}
+                onChange={updateRow}
+                onNext={() => {
+                  const idx = project.rows.findIndex((r) => r.id === selectedRowId);
+                  if (idx >= 0 && idx < project.rows.length - 1) setSelectedRowId(project.rows[idx + 1].id);
+                }}
+              />
+            ) : (
+              <div className="rounded-lg border border-border bg-card p-10 text-center text-sm text-muted-foreground">Select a row</div>
+            )}
+          </div>
+        </div>
+      ) : (
+        <SheetView rows={project.rows} rubric={project.rubric} filter={filter} setFilter={setFilter} onChange={updateRow} />
+      )}
+    </div>
+  );
+}
+
+function SheetView({
+  rows, rubric, filter, setFilter, onChange,
+}: {
+  rows: Row[]; rubric: Rubric;
+  filter: "all" | "pass" | "fail" | "incomplete"; setFilter: (f: "all" | "pass" | "fail" | "incomplete") => void;
+  onChange: (r: Row) => void;
+}) {
+  const filtered = rows.filter((r) => filter === "all" || effectiveStatus(r, rubric).status === filter);
+  const isBinary = rubric.mode === "binary";
+
+  return (
+    <div className="rounded-xl border border-border bg-card">
+      <div className="flex items-center justify-between border-b border-border p-2">
+        <div className="flex items-center gap-1">
+          {(["all", "pass", "fail", "incomplete"] as const).map((f) => (
+            <Button key={f} size="sm" variant={filter === f ? "secondary" : "ghost"}
+              className="h-7 px-2 text-xs capitalize" onClick={() => setFilter(f)}>{f}</Button>
+          ))}
+        </div>
+        <div className="font-mono text-[10px] text-muted-foreground">{filtered.length} / {rows.length} rows</div>
+      </div>
+      <ScrollArea className="h-[calc(100vh-300px)]">
+        <table className="w-full border-collapse text-sm">
+          <thead className="sticky top-0 z-10 bg-surface-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+            <tr>
+              <th className="w-10 border-b border-border px-2 py-2 text-left font-medium">#</th>
+              <th className="w-12 border-b border-border px-2 py-2 text-left font-medium">St</th>
+              <th className="border-b border-border px-2 py-2 text-left font-medium">Input</th>
+              <th className="border-b border-border px-2 py-2 text-left font-medium">Ground truth</th>
+              <th className="border-b border-r border-border px-2 py-2 text-left font-medium">Prediction</th>
+              {isBinary ? (
+                <th className="w-44 border-b border-border px-2 py-2 text-center font-medium">Verdict</th>
+              ) : (
+                rubric.dimensions.map((d) => (
+                  <th key={d.id} className="w-32 border-b border-border px-2 py-2 text-center font-medium" title={d.description ?? d.name}>
+                    {d.name}
+                  </th>
+                ))
+              )}
+              <th className="w-56 border-b border-l border-border px-2 py-2 text-left font-medium">Notes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((r, i) => {
+              const s = effectiveStatus(r, rubric);
+              return (
+                <tr key={r.id} className="group hover:bg-surface-2/60">
+                  <td className="border-b border-border px-2 py-1.5 align-top font-mono text-[10px] text-muted-foreground">{rows.indexOf(r) + 1}</td>
+                  <td className="border-b border-border px-2 py-2 align-top"><StatusDot status={s.status} /></td>
+                  <td className="border-b border-border p-0 align-top">
+                    <CellTextarea value={r.input} onChange={(v) => onChange({ ...r, input: v })} />
+                  </td>
+                  <td className="border-b border-border p-0 align-top">
+                    <CellTextarea value={r.groundTruth} onChange={(v) => onChange({ ...r, groundTruth: v })} />
+                  </td>
+                  <td className="border-b border-r border-border p-0 align-top">
+                    <CellTextarea value={r.prediction} onChange={(v) => onChange({ ...r, prediction: v })} accent />
+                  </td>
+                  {isBinary ? (
+                    <td className="border-b border-border px-2 py-1.5 align-top">
+                      <div className="flex items-center justify-center gap-1">
+                        <Button size="sm" variant={r.manualStatus === "pass" ? "default" : "outline"}
+                          className={cn("h-7 w-14 text-xs", r.manualStatus === "pass" && "bg-success text-success-foreground hover:bg-success/90")}
+                          onClick={() => onChange({ ...r, manualStatus: r.manualStatus === "pass" ? null : "pass" })}>
+                          <Check className="h-3 w-3" />
+                        </Button>
+                        <Button size="sm" variant={r.manualStatus === "fail" ? "destructive" : "outline"} className="h-7 w-14 text-xs"
+                          onClick={() => onChange({ ...r, manualStatus: r.manualStatus === "fail" ? null : "fail" })}>
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
+                      {rubric.autoMatch?.enabled && !r.manualStatus && (
+                        <div className="mt-1 text-center font-mono text-[10px] text-muted-foreground">{s.reasons[0]}</div>
+                      )}
+                    </td>
+                  ) : (
+                    rubric.dimensions.map((d) => (
+                      <td key={d.id} className="border-b border-border px-1 py-1.5 align-top">
+                        <ScoreCell dim={d} value={r.scores[d.id] ?? null}
+                          onChange={(v) => onChange({ ...r, scores: { ...r.scores, [d.id]: v } })} />
+                      </td>
+                    ))
+                  )}
+                  <td className="border-b border-l border-border p-0 align-top">
+                    <CellTextarea value={r.notes ?? ""} onChange={(v) => onChange({ ...r, notes: v })} placeholder="…" />
+                  </td>
+                </tr>
+              );
+            })}
+            {filtered.length === 0 && (
+              <tr><td colSpan={isBinary ? 7 : 6 + rubric.dimensions.length} className="py-12 text-center text-xs text-muted-foreground">No rows match this filter</td></tr>
+            )}
+          </tbody>
+        </table>
+      </ScrollArea>
+    </div>
+  );
+}
+
+function CellTextarea({ value, onChange, placeholder, accent }: { value: string; onChange: (v: string) => void; placeholder?: string; accent?: boolean }) {
+  return (
+    <textarea
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      rows={2}
+      className={cn(
+        "min-h-[44px] w-full resize-y bg-transparent px-2 py-1.5 text-xs leading-snug outline-none placeholder:text-muted-foreground/50",
+        accent && "text-foreground"
+      )}
+    />
+  );
+}
+
+function ScoreCell({ dim, value, onChange }: { dim: Dimension; value: number | null; onChange: (v: number | null) => void }) {
+  const options = Array.from({ length: Math.max(0, dim.max - dim.min + 1) }, (_, i) => dim.min + i);
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-0.5">
+      {options.map((n) => (
+        <button key={n} onClick={() => onChange(value === n ? null : n)}
+          className={cn(
+            "h-6 w-6 rounded border text-[10px] font-medium transition-all",
+            value === n
+              ? "border-accent bg-accent text-accent-foreground"
+              : "border-border bg-surface text-muted-foreground hover:border-foreground/30 hover:text-foreground"
+          )}>{n}</button>
+      ))}
     </div>
   );
 }
