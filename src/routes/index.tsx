@@ -499,12 +499,32 @@ function RubricEditor({ rubric, onChange }: { rubric: Rubric; onChange: (r: Rubr
       )}
 
       {rubric.mode === "binary" && (
-        <div className="rounded-xl border border-dashed border-border bg-card p-6 text-center">
-          <Check className="mx-auto h-5 w-5 text-success" />
-          <div className="mt-2 text-sm font-medium">Binary mode is ready</div>
-          <p className="mx-auto mt-1 max-w-md text-xs text-muted-foreground">
-            On the Score step you'll mark each row PASS or FAIL. You can still discover failure
-            categories in the Cluster step.
+        <div className="rounded-xl border border-border bg-card p-4">
+          <SectionHeader title="Auto-match (optional)" subtitle="Auto-compute PASS/FAIL by comparing prediction to ground truth. Manual verdicts still override." />
+          <div className="mt-3 flex items-center gap-3">
+            <label className="flex items-center gap-2 text-sm">
+              <Checkbox
+                checked={!!rubric.autoMatch?.enabled}
+                onCheckedChange={(c) =>
+                  onChange({ ...rubric, autoMatch: { mode: rubric.autoMatch?.mode ?? "normalized", enabled: !!c } })
+                }
+              />
+              <span>Enable auto-match</span>
+            </label>
+            <Select
+              value={rubric.autoMatch?.mode ?? "normalized"}
+              onValueChange={(v) => onChange({ ...rubric, autoMatch: { enabled: !!rubric.autoMatch?.enabled, mode: v as "exact" | "normalized" | "contains" } })}
+            >
+              <SelectTrigger className="h-8 w-[220px]"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="normalized">Normalized (trim + case-insensitive)</SelectItem>
+                <SelectItem value="exact">Exact match</SelectItem>
+                <SelectItem value="contains">Prediction contains ground truth</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <p className="mt-3 text-xs text-muted-foreground">
+            Best for classification, routing, or short-answer tasks where there's a single correct answer.
           </p>
         </div>
       )}
