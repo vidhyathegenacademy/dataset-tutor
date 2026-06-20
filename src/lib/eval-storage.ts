@@ -33,7 +33,7 @@ export function newProject(name: string): Project {
     name,
     createdAt: Date.now(),
     updatedAt: Date.now(),
-    rubric: defaultRubric(),
+    rubric: emptyRubric(),
     rows: [],
   };
 }
