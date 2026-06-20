@@ -9,6 +9,7 @@ const FailureItem = z.object({
   prediction: z.string().default(""),
   notes: z.string().default(""),
   reasons: z.array(z.string()).default([]),
+  extra: z.record(z.string(), z.string()).default({}),
 });
 
 const Input = z.object({
@@ -17,6 +18,14 @@ const Input = z.object({
     .array(z.object({ id: z.string(), name: z.string(), description: z.string().optional() }))
     .default([]),
   maxCategories: z.number().int().min(2).max(10).default(5),
+  llm: z
+    .object({
+      provider: z.enum(["openai", "custom", "lovable"]).default("openai"),
+      model: z.string().optional(),
+      apiKey: z.string().optional(),
+      baseURL: z.string().optional(),
+    })
+    .default({ provider: "openai" }),
 });
 
 const OutputSchema = z.object({
@@ -34,11 +43,8 @@ const OutputSchema = z.object({
 export const clusterFailures = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => Input.parse(d))
   .handler(async ({ data }) => {
-    const key = process.env.LOVABLE_API_KEY;
-    if (!key) throw new Error("Missing LOVABLE_API_KEY");
-
-    const { createLovableAiGatewayProvider } = await import("./ai-gateway.server");
-    const gateway = createLovableAiGatewayProvider(key);
+    const { createClusterLlmProvider } = await import("./ai-gateway.server");
+    const { gateway, model } = createClusterLlmProvider(data.llm);
 
     const trimmed = data.failures.map((f) => ({
       id: f.id,
@@ -47,6 +53,12 @@ export const clusterFailures = createServerFn({ method: "POST" })
       prediction: f.prediction.slice(0, 600),
       notes: f.notes.slice(0, 300),
       reasons: f.reasons.slice(0, 6),
+      traceFields: Object.fromEntries(
+        Object.entries(f.extra)
+          .filter(([, value]) => value.trim().length > 0)
+          .slice(0, 20)
+          .map(([key, value]) => [key, value.slice(0, 600)]),
+      ),
     }));
 
     const prompt = [
@@ -58,6 +70,7 @@ export const clusterFailures = createServerFn({ method: "POST" })
             .join("\n")}`
         : "",
       `Every failure id MUST appear in exactly one category. Category names should be short and human-readable. Descriptions should explain the shared pattern AND a likely fix.`,
+      `Use the input, ground truth, prediction, evaluator notes, score reasons, and traceFields from the original CSV to infer the root cause.`,
       ``,
       `FAILURES (JSON):`,
       JSON.stringify(trimmed),
@@ -66,7 +79,7 @@ export const clusterFailures = createServerFn({ method: "POST" })
       .join("\n");
 
     const { object } = await generateObject({
-      model: gateway("google/gemini-3-flash-preview"),
+      model: gateway(model),
       schema: OutputSchema,
       prompt,
     });

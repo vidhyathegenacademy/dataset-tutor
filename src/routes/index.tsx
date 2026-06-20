@@ -13,6 +13,7 @@ import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
 import {
@@ -45,6 +46,38 @@ export const Route = createFileRoute("/")({
 });
 
 type Step = "data" | "rubric" | "score" | "cluster" | "summary";
+type ClusterAiProvider = "openai" | "custom" | "lovable";
+
+const DEFAULT_CLUSTER_MODELS: Record<ClusterAiProvider, string> = {
+  openai: "gpt-5.5",
+  custom: "",
+  lovable: "google/gemini-3-flash-preview",
+};
+const CLUSTER_AI_SETTINGS_KEY = "eval-cluster-ai-settings-v1";
+
+type ClusterAiStoredSettings = {
+  provider?: ClusterAiProvider;
+  maxCategories?: string;
+  models?: Partial<Record<ClusterAiProvider, string>>;
+  apiKeys?: Partial<Record<ClusterAiProvider, string>>;
+  customBaseUrl?: string;
+};
+
+function loadClusterAiSettings(): ClusterAiStoredSettings {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = localStorage.getItem(CLUSTER_AI_SETTINGS_KEY);
+    return raw ? (JSON.parse(raw) as ClusterAiStoredSettings) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveClusterAiSettings(settings: ClusterAiStoredSettings) {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(CLUSTER_AI_SETTINGS_KEY, JSON.stringify(settings));
+}
+
 const STEPS: { id: Step; label: string; icon: typeof Database }[] = [
   { id: "data", label: "Data", icon: Database },
   { id: "rubric", label: "Rubric", icon: Settings2 },
@@ -999,12 +1032,49 @@ function ClusterPanel({ project, update }: { project: Project; update: (u: (p: P
   const [newCatName, setNewCatName] = useState("");
   const [newCatDesc, setNewCatDesc] = useState("");
   const [focusRowId, setFocusRowId] = useState<string | null>(null);
+  const aiSettings = useMemo(() => loadClusterAiSettings(), []);
+  const initialAiProvider = aiSettings.provider ?? "openai";
+  const [aiMode, setAiMode] = useState(false);
+  const [aiMaxCategories, setAiMaxCategories] = useState(aiSettings.maxCategories ?? "5");
+  const [aiProvider, setAiProvider] = useState<ClusterAiProvider>(initialAiProvider);
+  const [aiModels, setAiModels] = useState<Partial<Record<ClusterAiProvider, string>>>(() => ({
+    ...DEFAULT_CLUSTER_MODELS,
+    ...aiSettings.models,
+  }));
+  const [aiApiKeys, setAiApiKeys] = useState<Partial<Record<ClusterAiProvider, string>>>(() => aiSettings.apiKeys ?? {});
+  const [aiCustomBaseUrl, setAiCustomBaseUrl] = useState(aiSettings.customBaseUrl ?? "");
   const [aiLoading, setAiLoading] = useState(false);
   const runCluster = useServerFn(clusterFailures);
+  const aiModel = aiModels[aiProvider] ?? DEFAULT_CLUSTER_MODELS[aiProvider];
+  const aiApiKey = aiApiKeys[aiProvider] ?? "";
 
-  async function autoClusterWithAI(scope: "unassigned" | "all") {
+  useEffect(() => {
+    saveClusterAiSettings({
+      provider: aiProvider,
+      maxCategories: aiMaxCategories,
+      models: aiModels,
+      apiKeys: aiApiKeys,
+      customBaseUrl: aiCustomBaseUrl,
+    });
+  }, [aiProvider, aiMaxCategories, aiModels, aiApiKeys, aiCustomBaseUrl]);
+
+  function changeAiProvider(provider: ClusterAiProvider) {
+    setAiProvider(provider);
+    setAiModels((prev) => ({ ...prev, [provider]: prev[provider] ?? DEFAULT_CLUSTER_MODELS[provider] }));
+  }
+
+  function setCurrentAiModel(model: string) {
+    setAiModels((prev) => ({ ...prev, [aiProvider]: model }));
+  }
+
+  function setCurrentAiApiKey(apiKey: string) {
+    setAiApiKeys((prev) => ({ ...prev, [aiProvider]: apiKey }));
+  }
+
+  async function autoClusterWithAI(scope: "unassigned" | "all", replaceTaxonomy = scope === "all") {
     const pool = scope === "unassigned" ? unassigned : failures;
     if (pool.length === 0) { toast.error("No failures to cluster"); return; }
+    const maxCategories = Math.min(10, Math.max(2, Number(aiMaxCategories) || 5));
     setAiLoading(true);
     try {
       const result = await runCluster({
@@ -1016,15 +1086,56 @@ function ClusterPanel({ project, update }: { project: Project; update: (u: (p: P
             prediction: r.prediction ?? "",
             notes: r.notes ?? "",
             reasons: effectiveStatus(r, rubric).reasons,
+            extra: r.extra ?? {},
           })),
           existingCategories: scope === "unassigned"
             ? rubric.categories.map((c) => ({ id: c.id, name: c.name, description: c.description }))
             : [],
-          maxCategories: Math.min(8, Math.max(2, Math.round(Math.sqrt(pool.length)) + 1)),
+          maxCategories,
+          llm: {
+            provider: aiProvider,
+            model: aiModel,
+            apiKey: aiApiKey,
+            baseURL: aiProvider === "custom" ? aiCustomBaseUrl : undefined,
+          },
         },
       });
 
       update((p) => {
+        if (replaceTaxonomy) {
+          const previousByName = new Map(p.rubric.categories.map((c) => [c.name.trim().toLowerCase(), c]));
+          const generatedByName = new Map<string, FailureCategory>();
+          for (const c of result.categories) {
+            const key = c.name.trim().toLowerCase();
+            if (!key || generatedByName.has(key)) continue;
+            const previous = previousByName.get(key);
+            generatedByName.set(key, {
+              id: previous?.id ?? uid(),
+              name: c.name,
+              description: c.description || previous?.description,
+            });
+          }
+
+          const newCats = Array.from(generatedByName.values());
+          const assignments = new Map<string, string>();
+          for (const c of result.categories) {
+            const cat = generatedByName.get(c.name.trim().toLowerCase());
+            if (!cat) continue;
+            for (const fid of c.failureIds) assignments.set(fid, cat.id);
+          }
+          const clusteredFailureIds = new Set(pool.map((r) => r.id));
+
+          return {
+            ...p,
+            rubric: { ...p.rubric, categories: newCats },
+            rows: p.rows.map((r) =>
+              clusteredFailureIds.has(r.id)
+                ? { ...r, categoryId: assignments.get(r.id) ?? null }
+                : r,
+            ),
+          };
+        }
+
         const existingByName = new Map(p.rubric.categories.map((c) => [c.name.toLowerCase(), c]));
         const newCats: FailureCategory[] = [...p.rubric.categories];
         const assignments = new Map<string, string>(); // rowId -> catId
@@ -1050,11 +1161,19 @@ function ClusterPanel({ project, update }: { project: Project; update: (u: (p: P
           ),
         };
       });
-      toast.success(`AI proposed ${result.categories.length} categor${result.categories.length === 1 ? "y" : "ies"}`);
+      toast.success(
+        replaceTaxonomy
+          ? `AI generated ${result.categories.length} categor${result.categories.length === 1 ? "y" : "ies"} from ${pool.length} failures`
+          : `AI sorted ${pool.length} failure${pool.length === 1 ? "" : "s"}`,
+      );
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       if (msg.includes("429")) toast.error("Rate limited — try again in a moment.");
       else if (msg.includes("402")) toast.error("Out of AI credits. Add credits in your workspace billing.");
+      else if (msg.includes("OPENAI_API_KEY")) toast.error("Missing OPENAI_API_KEY on the server.");
+      else if (msg.includes("OPENAI_COMPATIBLE_API_KEY")) toast.error("Missing OPENAI_COMPATIBLE_API_KEY on the server.");
+      else if (msg.includes("OPENAI_COMPATIBLE_BASE_URL")) toast.error("Missing OPENAI_COMPATIBLE_BASE_URL on the server.");
+      else if (msg.includes("OPENAI_COMPATIBLE_MODEL")) toast.error("Missing model for the custom LLM provider.");
       else toast.error(`Auto-cluster failed: ${msg}`);
     } finally {
       setAiLoading(false);
@@ -1158,21 +1277,124 @@ function ClusterPanel({ project, update }: { project: Project; update: (u: (p: P
       <div className="col-span-5 space-y-3">
         <div className="flex items-center justify-between gap-2">
           <SectionHeader title="Failure categories" subtitle="Cluster results by root cause." />
-          <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="secondary"
-              disabled={aiLoading || failures.length === 0}
-              onClick={() => autoClusterWithAI(rubric.categories.length === 0 ? "all" : "unassigned")}
-              title={rubric.categories.length === 0 ? "Let AI propose categories for all failures" : "Let AI sort unassigned failures into existing or new categories"}
-            >
-              {aiLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
-              {rubric.categories.length === 0 ? "Auto-cluster with AI" : "AI: sort unassigned"}
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => { setCreateOpen(true); }}>
-              <Plus className="h-3.5 w-3.5" />New
-            </Button>
+          <Button size="sm" variant="outline" onClick={() => { setCreateOpen(true); }}>
+            <Plus className="h-3.5 w-3.5" />New
+          </Button>
+        </div>
+
+        <div className={cn(
+          "rounded-xl border p-4 transition-colors",
+          aiMode ? "border-accent/40 bg-accent/5" : "border-border bg-card",
+        )}>
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-3">
+              <div className={cn(
+                "grid h-8 w-8 shrink-0 place-items-center rounded-md",
+                aiMode ? "bg-accent text-accent-foreground" : "bg-muted text-muted-foreground",
+              )}>
+                <Wand2 className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-semibold">AI mode</div>
+                <div className="text-xs text-muted-foreground">Generate categories from every failure trace.</div>
+              </div>
+            </div>
+            <Switch checked={aiMode} onCheckedChange={setAiMode} aria-label="Toggle AI mode" />
           </div>
+
+          {aiMode && (
+            <div className="mt-3 space-y-3">
+              <div className="flex flex-wrap items-end gap-2">
+                <div className="min-w-[130px]">
+                  <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Provider</Label>
+                  <Select value={aiProvider} onValueChange={(v) => changeAiProvider(v as ClusterAiProvider)}>
+                    <SelectTrigger className="mt-1 h-8 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="openai">OpenAI</SelectItem>
+                      <SelectItem value="custom">Custom</SelectItem>
+                      <SelectItem value="lovable">Lovable</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="min-w-[190px] flex-1">
+                  <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Model</Label>
+                  <Input
+                    className="mt-1 h-8 text-xs"
+                    value={aiModel}
+                    onChange={(e) => setCurrentAiModel(e.target.value)}
+                    placeholder={aiProvider === "custom" ? "Set model or env default" : "Model name"}
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-end gap-2">
+                {aiProvider === "custom" && (
+                  <div className="min-w-[220px] flex-1">
+                    <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">Base URL</Label>
+                    <Input
+                      className="mt-1 h-8 text-xs"
+                      value={aiCustomBaseUrl}
+                      onChange={(e) => setAiCustomBaseUrl(e.target.value)}
+                      placeholder="https://api.example.com/v1"
+                    />
+                  </div>
+                )}
+                <div className="min-w-[220px] flex-1">
+                  <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">API key</Label>
+                  <Input
+                    className="mt-1 h-8 text-xs"
+                    type="password"
+                    autoComplete="off"
+                    value={aiApiKey}
+                    onChange={(e) => setCurrentAiApiKey(e.target.value)}
+                    placeholder={
+                      aiProvider === "openai"
+                        ? "sk-..."
+                        : aiProvider === "lovable"
+                          ? "Lovable API key"
+                          : "Provider API key"
+                    }
+                  />
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Select value={aiMaxCategories} onValueChange={setAiMaxCategories}>
+                  <SelectTrigger className="h-8 w-[150px] text-xs">
+                    <SelectValue placeholder="Max categories" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {[2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                      <SelectItem key={n} value={String(n)}>{n} max categories</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button
+                  size="sm"
+                  disabled={aiLoading || failures.length === 0}
+                  onClick={() => autoClusterWithAI("all", true)}
+                  title="Replace the current taxonomy with AI-generated categories for all failures"
+                >
+                  {aiLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
+                  Run on all failures
+                </Button>
+                {rubric.categories.length > 0 && unassigned.length > 0 && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={aiLoading}
+                    onClick={() => autoClusterWithAI("unassigned", false)}
+                    title="Keep existing categories and sort only unassigned failures"
+                  >
+                    Sort unassigned
+                  </Button>
+                )}
+              </div>
+              <div className="text-[11px] text-muted-foreground">
+                Running on all failures replaces the category list and reassigns failed rows.
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="space-y-2">
@@ -1197,7 +1419,7 @@ function ClusterPanel({ project, update }: { project: Project; update: (u: (p: P
           })}
           {rubric.categories.length === 0 && (
             <div className="rounded-md border border-dashed border-border p-6 text-center text-xs text-muted-foreground">
-              No categories yet. Select a few similar failures on the left and click <b>New category from selection</b>.
+              No categories yet. Use AI mode or create one from selected failures.
             </div>
           )}
         </div>
@@ -1357,28 +1579,32 @@ function SummaryPanel({ project }: { project: Project }) {
   const fail = failures.length;
   const maxCat = Math.max(1, ...catCounts.map((c) => c.count), unassignedFailures);
 
-  // Precision / Recall / F1 from groundTruth vs prediction (treating each unique label as a class).
+  // Precision / Recall / F1 from every imported trace, not just failed rows.
   const metrics = useMemo(() => computePRF1(rows), [rows]);
+  const metricsScope =
+    metrics.n === rows.length
+      ? `${rows.length} trace${rows.length === 1 ? "" : "s"} used`
+      : `${metrics.n} of ${rows.length} traces used`;
 
   return (
     <div className="grid grid-cols-12 gap-4">
       <div className="col-span-12 rounded-xl border border-border bg-card p-5">
         <div className="flex items-baseline justify-between gap-4">
           <div className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Classification metrics
+            All-trace precision, recall, and F1
             <span className="ml-2 normal-case text-[10px] font-normal text-muted-foreground/70">macro-averaged · ground truth vs. prediction</span>
           </div>
-          <div className="text-xs text-muted-foreground">{pass} pass · {fail} fail · {rows.length} total · {metrics.classes.length} class{metrics.classes.length === 1 ? "" : "es"}</div>
+          <div className="text-xs text-muted-foreground">{metricsScope} · {pass} pass · {fail} fail · {metrics.classes.length} class{metrics.classes.length === 1 ? "" : "es"}</div>
         </div>
         {metrics.n === 0 ? (
           <div className="mt-4 text-xs text-muted-foreground">No labeled rows to score.</div>
         ) : (
           <>
             <div className="mt-4 grid grid-cols-4 gap-3">
-              <MetricTile label="Accuracy" value={metrics.accuracy} />
               <MetricTile label="Precision" value={metrics.precision} accent />
               <MetricTile label="Recall" value={metrics.recall} accent />
-              <MetricTile label="F1" value={metrics.f1} accent />
+              <MetricTile label="F1 Score" value={metrics.f1} accent />
+              <MetricTile label="Accuracy" value={metrics.accuracy} />
             </div>
             {metrics.classes.length > 1 && (
               <div className="mt-5">
